@@ -1,12 +1,14 @@
-# ZWO SkyCam
+# ZWO Darkgen
 
-SkyCam module is an abstration layer for Python [zwoasi](https://github.com/stevemarple/python-zwoasi) binding.
+Darkgen is a dark frame library generator for ZWO cameras intended for use with [allsky](https://github.com/thomasjacquin/allsky). It is derived from [zwo-skycam](https://github.com/filiparag/zwo-skycam), an abstration layer for Python [zwoasi](https://github.com/stevemarple/python-zwoasi) binding.
 
 ## Installation
 
-This library is mainly intended to be run on Raspbery Pi 3. It should work on other similar ARM platforms without any hiccups, but your mileage may vary.
+This tool was developed on `x86_64` and should run on any posix-like platform for which the ZWO SDK is available, but your mileage may vary.
 
 ### Prerequisites
+
+If you are using this with an allsky installation, simply point the tool at the library. Otherwise, fetch the SDK from [ZWO](https://astronomy-imaging-camera.com/software-drivers).
 
 Updating repositories
 
@@ -18,7 +20,7 @@ Git (optional)
 
 Python 3
 
-`sudo apt -y install python3 pyton3-pip libusb-1.0-0`
+`sudo apt -y install python3 python3-pip libusb-1.0-0`
 
 Modules
 
@@ -28,64 +30,35 @@ Modules
 
 You can clone this repository by executing:
 
-`git clone https://github.com/filiparag/zwo-skycam.git`
+`git clone https://github.com/ckuethe/zwo-darkgen`
 
 or download the archived repository from GitHub website.
 
-## RAMdisk
-
-If you have a slow SD card or just want to store captured frames in RAM, you can run:
-
-`sudo ./ramdisk.sh`
-
-This script will create a *ramfs* partition mounted at `/mnt/skycam`.
-
 ## Usage
 
-To use this framework, copy both `skycam.py` and `asi.so` into the folder of your project. After this, you can import *zwo-skycam* with `from skycam import SkyCam`.
+```
+usage: darkgen.py [-h] [-c CAMERA] [-I] [-l PATH] [-d PATH] [-f STR] [-g MIN:MAX:STEP] [-x MIN:MAX:STEP] [-v] [--flip {n,h,v,hv,vh,b}]
+                  [--binning BINNING] [--stack STACK] [--quality QUALITY]
 
-### Initialization
+optional arguments:
+  -h, --help            show this help message and exit
+  -c CAMERA, --camera CAMERA Camera index (default: None)
+  -I, --info            Print info about selected camera (default: False)
+  -l PATH, --library PATH path to SDK library (default: ./libASICamera2.so)
+  -d PATH, --directory PATH path to output darks (default: zwo_dark)
+  -f STR, --filename-format STR filename pattern for darks. The tokens {expms}, {gain}, and {temp} will be interpolated as python formats. (default: dark_{expms}ms_{gain:03d}g_{temp:+03d}C.png)
+  -g MIN:MAX:STEP, --gain MIN:MAX:STEP gain range to scan (-1=automatic) (default: -1:-1:5)
+  -x MIN:MAX:STEP, --exposure MIN:MAX:STEP exposure range to scan, in seconds. (default: 1:120:1)
+  -v, --verbose
+  --flip {n,h,v,hv,vh,b} flip image: none, horizonal, vertical, both (default: None)
+  --binning BINNING     Pixel binning factor (default: 1)
+  --stack STACK         Number of exposures to stack to build dark frame (default: 1)
+  --quality QUALITY     image quality (default: 100)
 
-At first, the framework has to establish the connetion with a camera. This can be done by calling:
-
-`SkyCam.initialize( _library )`
-
-function, where you can use `_library` parameter to indicate different location of the `asi.so` library.
-
-### Configuration
-
-Use `SkyCam.cameras()` to see the list of connected cameras. Select one from the list and create its object like following:
-
-`my_camera = SkyCam('ZWO ASI120MM')`
-
-Camera is now ready to be used. If you want to change any of the settings, you can do it with
-
-`configure( _gain, _exposure, _wb_b, _wb_r, _gamma, _brightness, _flip, _bin, _roi, _drange=8, _color, _mode )`
-
-Parameter `_mode` has two options: `'picture'` and `'video'`. If you need good framerate, run capturing in video mode, otherwise they should work similarly.
-
-For more details about control, read the *docstring* of the function in `skycam.py`.
-
-### Capturing
-
-To capture a single frame, use `capture( _directory, _file, _format )`. If you don't supply any parameters, this method will return the frame as a NumPy array. File name parameter goes through `strftime()` formatting, so you can easily add time and date.
-
-Default value for `_directory` is current path and for `_file` is like in the following example: `ZWO-ASI174MM-2017-08-19-15-40-55-UTC-12`.
-
-### Recording
-
-Recording mode can be used to automatically capture sequential frames. Before starting a recording session, you need to configure it using:
-
-`recorder.configure( _delay, _keep, _save, _directory, _file, _format )`
-
-After this you can use `recorder.start()` and `recorder.stop()` to start and stop recording.
-
-Method `recorder.buffer_is_empty()` returns whether the buffer is empty. 
-
-Methods `recorder.buffer_next()` and `recorder.buffer_all()` return oldest and all frames in the buffer respectively. Note that `recorder.buffer_next()` erases retrieved image from the buffer.
-
-To clear the buffer, use `recorder.buffer_clear()`. Loading frames saved on storage media can be done using `recorder.buffer_load()`.
-
----
-
-Detailed explanation for every function can be found in form of *docstrings* in `skycam.py`.
+When constructing the output filename, the following tokens are available:
+{temp} - sensor temperature in C, rounded up: 26.1 -> 27;
+{gain} - gain in arbitrary units;
+{expms} - exposure time in milliseconds;
+{model} - sanitized camera model: 'ZWO ASI120MM Mini' -> 'zwo_asi120mm_mini';
+{stack} - stacking factor
+```

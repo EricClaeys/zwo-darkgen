@@ -2,331 +2,380 @@
 
 import os
 import time
+from typing import List, Optional, Tuple
+import logging
 import zwoasi as asi
-from threading import Thread
-from queue import Queue
+from numpy import uint8
 from PIL import Image
-from glob import glob
+import argparse
+
+logger: logging.Logger = logging.getLogger()
 
 
-class SkyCam:
-    """SkyCam is an abstraction layer for zwoasi Python bindings"""
+class ZwoCamera:
+    """ZwoCamera is an abstraction layer for zwoasi Python bindings"""
+
+    mode = None
 
     @staticmethod
-    def initialize(_library=None):
-        """Initialize ZWOASI SDK library
+    def initialize(library=None):
+        if library is None:
+            library = os.path.dirname(os.path.realpath(__file__)) + "/asi.so"
 
-        The official SDK library can be obtained from this link:
-        https://astronomy-imaging-camera.com/tets1/
-
-        Args:
-            _library (str): ovveride default location for the library
-
-        """
-
-        if _library is None:
-            _library = os.path.dirname(os.path.realpath(__file__)) + "/asi.so"
-
-        asi.init(_library)
+        asi.init(library)
 
     @staticmethod
     def cameras():
-        """List of conneted cameras
-
-        Returns:
-            list: List of camera names as sttings
-
-        """
-
         return asi.list_cameras()
 
-    def __init__(self, _camera_id, _bandwidth=80):
-        """Initializes a SkyCam camera object
+    def _get_default(self, prop):
+        return None if prop not in self.camera_properties else self.camera_properties[prop].get("DefaultValue", None)
 
-        This funtion automatically sets camera parameters
-        to default settings. To change them use configure()
-
-        Args:
-            _camera_id (int): Camera ID in the cameras() list or it's name
-
-        """
-
-        self.camera = asi.Camera(_camera_id)
-        self.camera_info = self.camera.get_camera_property()
-        self.camera.set_control_value(asi.ASI_BANDWIDTHOVERLOAD, _bandwidth)
+    def __init__(self, camera_id=None, bandwidth=80):
+        "Initialize self.camera to a default good state"
+        logger.debug("Creating Camera")
+        self.camera = asi.Camera(camera_id)
         self.camera.stop_video_capture()
         self.camera.stop_exposure()
-        self.configure()
-        self.frame_buffer = Queue()
-        self.frame_counter = 0
-        self.recorder = self.Recorder(self)
 
-        self.camera.set_control_value(asi.ASI_GAIN, 150)
-        self.camera.set_control_value(asi.ASI_EXPOSURE, 1000000)
-        self.camera.set_control_value(asi.ASI_WB_B, 99)
-        self.camera.set_control_value(asi.ASI_WB_R, 75)
-        self.camera.set_control_value(asi.ASI_GAMMA, 60)
-        self.camera.set_control_value(asi.ASI_BRIGHTNESS, 50)
-        self.camera.set_control_value(asi.ASI_FLIP, 0)
+        logger.debug("Getting camera info")
+        self.camera_info = self.camera.get_camera_property()
+
+        logger.debug("Getting camera controls")
+        self.camera_properties = self.camera.get_controls()
+
+        self.name = self.camera_info.get("Name", "").lower().replace(" ", "_")
+        self.camera.set_control_value(asi.ASI_BANDWIDTHOVERLOAD, bandwidth)
+
+        self.configure(
+            gain=self._get_default("Gain"),
+            exposure=self._get_default("Exposure"),
+            flip=self._get_default("Flip"),
+            wb_b=self._get_default("WB_B"),
+            wb_r=self._get_default("WB_R"),
+            gamma=self._get_default("Gamma"),
+            color=True if self._get_default("WB_R") else False,
+            drange=8,
+            binning=self.camera_info["SupportedBins"][0],
+        )
         self.camera.start_video_capture()
-        self.camera.set_image_type(asi.ASI_IMG_RAW8)
 
     def configure(
         self,
-        _gain=None,
-        _exposure=None,
-        _wb_b=None,
-        _wb_r=None,
-        _gamma=None,
-        _brightness=None,
-        _flip=None,
-        _bin=None,
-        _roi=None,
-        _drange=None,
-        _color=None,
-        _mode=None,
+        *,
+        gain=None,
+        exposure=None,
+        wb_b=None,
+        wb_r=None,
+        gamma=None,
+        offset=None,
+        flip=None,
+        binning=None,
+        roi=None,
+        drange=None,
+        color=None,
+        mode=None,
     ):
         """Used to change camera parameters
 
         Args:
-            _gain (int): Camera gain
-            _exposure (int): Camera exposure in microseconds
-            _wb_b (int): Camera whitebalance
-            _wb_r (int): Camera whitebalance
-            _gamma (int): Camera gamma
-            _brightness (int): Camera brightness
-            _flip (int): Picture flip, valuse can be 0 or 1
-            _bin (int): Picture binning, values can be 1 or 2
-            _roi (tuple): Region of interest, formatted as a
-                          tuple (x, y, width, height)
-            _drange (int): Dynamic range, value can be 8 or 16 bits
-            _color (bool): Camera oolor mode
-            _mode (str): Capturing mode, value can be 'video' or 'piture'
-                         If set to 'picture', apturing is a lot slower.
-
+            gain (int): Camera gain
+            exposure (int): Camera exposure in microseconds
+            wb_b (int): Camera whitebalance
+            wb_r (int): Camera whitebalance
+            gamma (int): Camera gamma
+            offset (int): Camera brightness
+            flip (int): Picture flip, valuse can be 0 or 1
+            binning (int): Picture binning, values can be 1 or 2
+            roi (tuple): Region of interest, formatted as a tuple (x, y, width, height)
+            drange (int): Dynamic range, value can be 8 or 16 bits
+            color (bool): Camera color mode
+            mode (str): Capturing mode, value can be 'video' or 'picture'
         """
 
+        self.camera.stop_video_capture()
         self.camera.stop_exposure()
 
-        if _mode == "video":
-            self.camera.start_video_capture()
-        elif _mode == "picture":
-            self.camera.stop_video_capture()
-        if _mode is not None:
-            self.mode = _mode
+        if exposure is not None:
+            self.camera.set_control_value(asi.ASI_EXPOSURE, exposure)
+        if gain is not None:
+            self.camera.set_control_value(asi.ASI_GAIN, gain)
+        if wb_b is not None:
+            self.camera.set_control_value(asi.ASI_WB_B, wb_b)
+        if wb_r is not None:
+            self.camera.set_control_value(asi.ASI_WB_R, wb_r)
+        if gamma is not None:
+            self.camera.set_control_value(asi.ASI_GAMMA, gamma)
+        if offset is not None:
+            self.camera.set_control_value(asi.ASI_OFFSET, offset)
+        if flip is not None:
+            self.camera.set_control_value(asi.ASI_FLIP, flip)
 
-        if _exposure is not None:
-            self.camera.set_control_value(asi.ASI_EXPOSURE, _exposure)
-        if _gain is not None:
-            self.camera.set_control_value(asi.ASI_GAIN, _gain)
-        if _wb_b is not None:
-            self.camera.set_control_value(asi.ASI_WB_B, _wb_b)
-        if _wb_r is not None:
-            self.camera.set_control_value(asi.ASI_WB_R, _wb_r)
-        if _gamma is not None:
-            self.camera.set_control_value(asi.ASI_GAMMA, _gamma)
-        if _brightness is not None:
-            self.camera.set_control_value(asi.ASI_BRIGHTNESS, _brightness)
-        if _flip is not None:
-            self.camera.set_control_value(asi.ASI_FLIP, _flip)
+        if binning is None:
+            binning = 1
 
-        if _bin is None:
-            _bin = 1
+        if roi is None:
+            roi = (0, 0, int(self.camera_info["MaxWidth"] / binning), int(self.camera_info["MaxHeight"] / binning))
 
-        if _roi is None:
-            _roi = (0, 0, int(self.camera_info["MaxWidth"] / _bin), int(self.camera_info["MaxHeight"] / _bin))
+        self.camera.set_roi(start_x=roi[0], start_y=roi[1], width=roi[2], height=roi[3], bins=binning)
 
-        self.camera.set_roi(start_x=_roi[0], start_y=_roi[1], width=_roi[2], height=_roi[3], bins=_bin)
-
-        if _color is True:
+        if color is True:
             self.camera.set_image_type(asi.ASI_IMG_RGB24)
-
         else:
-            if _drange is 8:
+            if drange == 8:
                 self.camera.set_image_type(asi.ASI_IMG_RAW8)
-            elif _drange is 16:
+            elif drange == 16:
                 self.camera.set_image_type(asi.ASI_IMG_RAW16)
 
-    def capture(self, _directory=None, _file=None, _format=".jpg"):
-        """Frame capturing function
+        if mode is not None:
+            # self.mode = mode
+            raise NotImplementedError("Capture mode selection not implemented")
+        self.camera.start_video_capture()
+        # if mode == "video":
+        #    self.camera.start_video_capture()
+        # elif mode == "picture":
+        #    self.camera.stop_video_capture()
 
-        If both _directory and _file are not declared, it will return
-        the picture as an array. Otherwise, undeclared parameters will
-        fall back to default values.
+    def retryable_capture(self, n=3, t=0.5):
+        exptime = self.get_exposure_time()
+        last_exception = None
+        for i in range(n):
+            try:
+                return self.camera.capture_video_frame()  # initial_sleep=exptime * 0.95, poll=exptime * 0.01)
+            except KeyboardInterrupt:
+                self.camera.stop_video_capture()
+                self.camera.stop_exposure()
+                raise
+            except asi.ZWO_Error as e:
+                time.sleep(t)
+                last_exception = str(e)
+        raise asi.ZWO_IOError(last_exception)
 
-        Args:
-            _directory (str): Path for saving captured photos
-            _file (str): File name, strftime formatting is enabled
-                         Formatting instrutions: http://strftime.org/
-            _format (str): Indiates piture format, default is JPEG
+    def get_temperature(self) -> float:
+        "helper method to retrieve sensor temperature in 'C"
+        return self.camera.get_control_value(asi.ASI_TEMPERATURE)[0] / 10
 
-        Returns:
-            numpy array: If both _directory and _file are not declared,
-            it will only return the picture as an array.
+    def get_exposure_time(self) -> float:
+        "helper method to retrieve exposure time in seconds"
+        return self.camera.get_control_value(asi.ASI_EXPOSURE)[0] / 1e6
 
-        """
+    def show_camera_info(self) -> None:
+        from json import dumps
 
-        if _file is None and _directory is not None:
-            _file = (
-                self.camera_info["Name"].replace(" ", "-")
-                + "-%Y-%m-%d-%H-%M-%S-%Z-"
-                + str(self.frame_counter)
-                + _format
+        tmp = dumps(self.camera_info, sort_keys=True, indent=2)
+        print(f"\nCamera Info:{tmp}")
+
+        tmp = dumps(self.camera_properties, sort_keys=True, indent=2)
+        print(f"\nCamera Controls: {tmp}")
+
+
+class ap_helpers:
+    "Just some custom type validators for argparse"
+
+    @staticmethod
+    def gain(s: str) -> List[int]:
+        fields = s.split(":")
+        if len(fields) != 3:
+            raise ValueError("Incorrect gain specification")
+        rv = [int(x) for x in fields]
+        if rv[0] < -2:
+            raise ValueError("Invalid minimum gain")
+        if rv[1] < -2:
+            raise ValueError("Invalid maxiumum gain")
+        if rv[2] < 0:
+            raise ValueError("Invalid gain step")
+        return rv
+
+    @staticmethod
+    def exposure(s: str) -> List[float]:
+        fields = s.split(":")
+        if len(fields) != 3:
+            raise ValueError("Incorrect exposure specification")
+        rv = [float(x) for x in fields]
+        if rv[0] < 1e-3:
+            raise ValueError("Invalid minimum exposure (min 1ms)")
+        if rv[1] > 900:
+            raise ValueError("Invalid maximum exposure (max 900s)")
+        if rv[2] < 1e-3:
+            raise ValueError("Invalid exposure step (min 1ms)")
+        return rv
+
+    @staticmethod
+    def pos_int(s: str) -> int:
+        i = int(s)
+        if i < 1:
+            raise ValueError("Positive integer required")
+        return i
+
+    @staticmethod
+    def img_size(s: str) -> Optional[Tuple[int]]:
+        if s is None:
+            return
+        s = [ap_helpers.pos_int(i) for i in s.lower().split("x")]
+        if len(s) != 2:
+            raise ValueError("Size specification must be in the form <int>x<int>")
+
+    @staticmethod
+    def flip(s=None) -> int:
+        flips = {"n": 0, "h": 1, "v": 2, "hv": 3, "vh": 3, "b": 3}
+        if s is None:
+            return list(flips.keys())
+        return flips[s.lower()]
+
+
+def get_args() -> argparse.Namespace:
+    ep = """
+    When constructing the output filename, the following tokens are available:
+    {temp} - sensor temperature in C, rounded up: 26.1 -> 27;
+    {gain} - gain in arbitrary units;
+    {expms} - exposure time in milliseconds;
+    {model} - sanitized camera model: 'ZWO ASI120MM Mini' -> 'zwo_asi120mm_mini';
+    {stack} - stacking factor
+    """
+
+    ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, epilog=ep)
+    ap.add_argument("-c", "--camera", type=int, help="Camera index")
+    ap.add_argument("-I", "--info", default=False, action="store_true", help="Print info about selected camera")
+    ap.add_argument("-l", "--library", metavar="PATH", default="./libASICamera2.so", help="path to SDK library")
+    ap.add_argument("-d", "--directory", metavar="PATH", default="zwo_dark", help="path to output darks")
+    ap.add_argument(
+        "-f",
+        "--filename-format",
+        metavar="STR",
+        default="dark_{expms}ms_{gain:03d}g_{temp:+03d}C.png",
+        help="filename pattern for darks. The tokens {expms}, {gain}, and {temp} will be interpolated as python formats.",
+    )
+    ap.add_argument(
+        "-g",
+        "--gain",
+        metavar="MIN:MAX:STEP",
+        default="-1:-1:5",
+        type=ap_helpers.gain,
+        help="gain range to scan (-1=automatic)",
+    )
+    ap.add_argument(
+        "-x",
+        "--exposure",
+        metavar="MIN:MAX:STEP",
+        default="1:120:1",
+        type=ap_helpers.exposure,
+        help="exposure range to scan, in seconds.",
+    )
+
+    # "Advanced" parameters
+    ap.add_argument("-v", "--verbose", default=0, action="count")
+    ap.add_argument(
+        "--flip", type=ap_helpers.flip, choices=ap_helpers.flip(), help="flip image: none, horizonal, vertical, both"
+    )
+    ap.add_argument("--binning", default=1, type=ap_helpers.pos_int, help="Pixel binning factor")
+    ap.add_argument(
+        "--stack", default=1, type=ap_helpers.pos_int, help="Number of exposures to stack to build dark frame"
+    )
+    ap.add_argument("--quality", default=100, type=int, help="image quality")
+    # ap.add_argument("--size", type=ap_helpers.img_size)
+    # ap.add_argument("--no-video", default=False, action="store_true")
+    return ap.parse_args()
+
+
+def main():
+    args = get_args()
+
+    if args.verbose:
+        loglevel = logging.DEBUG if args.verbose > 1 else logging.INFO
+    else:
+        loglevel = logging.WARNING
+    logger.setLevel(loglevel)
+    logging.basicConfig()
+
+    logger.debug("Initializing Library")
+    ZwoCamera.initialize(args.library)
+
+    logger.debug("Detecting Cameras")
+    camlist = [(i, c) for i, c in enumerate(ZwoCamera.cameras())]
+    if not camlist:
+        print("No cameras detected!")
+        exit()
+
+    if len(camlist) == 1:
+        args.camera = 0
+    elif args.camera is None:
+        print("No camera specified. Select one of:")
+        for c in camlist:
+            print(f"    {c[0]:2d} -> {c[1]}")
+        exit()
+
+    zwocam = ZwoCamera(args.camera)
+    if args.info:
+        zwocam.show_camera_info()
+        exit()
+
+    if args.gain[0] == -1:
+        args.gain[0] = zwocam.camera_properties["Gain"]["MinValue"]
+    if args.gain[1] == -1:
+        args.gain[1] = zwocam.camera_properties["Gain"]["MaxValue"]
+    if args.exposure[1] == -1:
+        args.exposure[1] = zwocam.camera_properties["Exposure"]["MaxValue"] // 1000
+    if args.binning and args.binning not in zwocam.camera_info["SupportedBins"]:
+        raise ValueError(f"Binning value must be one of {zwocam.camera_info['SupportedBins']}")
+
+    os.makedirs(args.directory, exist_ok=True)
+    img_params = {"quality": args.quality, "subsampling": 0 if args.quality >= 100 else 1}
+
+    for _ in range(5):
+        zwocam.camera.capture_video_frame()
+
+    # convert exposure to microseconds since that's what the library uses
+    args.exposure = [int(s * 1e6) for s in args.exposure]
+
+    exposure_list = list(range(args.exposure[0], args.exposure[1] + args.exposure[2], args.exposure[2]))
+    gain_list = list(range(args.gain[0], args.gain[1] + 1, args.gain[2]))
+
+    total_exp_time = len(gain_list) * sum(exposure_list) * args.stack * 1e-6
+    num_exps = len(gain_list) * len(exposure_list) * args.stack
+    total_storage = num_exps * zwocam.camera_info["MaxHeight"] * zwocam.camera_info["MaxWidth"]
+    total_storage *= 3 if zwocam.camera_info.get("IsColorCam", False) else 1
+
+    print(f"This run will take approximately {total_exp_time/60:.1f}min.", end=" ")
+    print(f"Estimated size {num_exps} files, {total_storage//1024**2}MB")
+
+    for exposure_us in exposure_list:
+        for gain in gain_list:
+            zwocam.configure(gain=gain, exposure=exposure_us, flip=args.flip)
+            images = []
+            temperatures = []
+            for i in range(args.stack):
+                # sensor temperature may go up with exposure time, so measure it every exposure
+                sensor_temp = zwocam.get_temperature()
+                if args.verbose:
+                    print(f"\rn:{i:2d} exp:{exposure_us/1e6:.1f}s gain:{gain:3d} temp:{sensor_temp:+5.1f}'C", end="")
+                images.append(zwocam.retryable_capture())
+                temperatures.append(sensor_temp)
+
+            # average the frames. maybe be more clever later
+            stack_image = sum(images) / args.stack
+            stack_image = Image.fromarray(stack_image.astype(uint8))
+            # always round up: -39.99C -> -39C, 0.01C -> 1C
+            stack_temperature = round(sum(temperatures) / args.stack + 0.5)
+
+            outfile = os.path.join(
+                args.directory,
+                args.filename_format.format_map(
+                    {
+                        "name": zwocam.name,
+                        "stack": args.stack,
+                        "gain": gain,
+                        "expms": exposure_us // 1000,
+                        "temp": int(stack_temperature),
+                    }
+                ),
             )
+            os.makedirs(os.path.dirname(outfile), exist_ok=True)
+            if os.path.exists(outfile):
+                os.unlink(outfile)
+            stack_image.save(outfile, params=img_params)
 
-            self.frame_counter += 1
+    print()
 
-        if _directory is None and _file is not None:
-            if not os.path.isdir("/tmp/skycam/"):
-                os.makedirs("/tmp/skycam", 755)
-            _directory = "/tmp/skycam/"
 
-        if _file is not None and _directory is not None:
-
-            _file = time.strftime(_file)
-
-            if self.mode == "picture":
-                self.camera.capture(filename=(_directory + "/" + _file))
-            elif self.mode == "video":
-                self.camera.capture_video_frame(filename=(_directory + "/" + _file))
-
-        if self.mode == "picture":
-            return self.camera.capture()
-        elif self.mode == "video":
-            return self.camera.capture_video_frame()
-
-    class Recorder:
-
-        """Recorder is used to record continuous
-            frames automatically
-
-        Note that Recorder class gets isntanced as
-        SkyCam.recorder object.
-
-        """
-
-        def __init__(self, _owner):
-
-            """Sets all variables to default state"""
-
-            self.owner = _owner
-            self.buffer = Queue()
-            self.recording = False
-
-            self.delay = 0
-            self.directory = None
-            self.file = None
-            self.format = None
-            self.keep = True
-            self.save = False
-
-        def configure(self, _delay=None, _keep=None, _save=None, _directory=None, _file=None, _format=None):
-
-            """Configure SkyCam recorder
-
-            Args:
-                _delay (int): Delay between frames in milliseconds
-                _keep (bool): Indicates whether to keep frames
-                              in RAM buffer
-                _save (bool): Indicates whether to keep frames
-                              to storage device
-                _directory (str): Path for saving captured photos
-                _file (str): File name, strftime formatting is enabled
-                             Formatting instrutions: http://strftime.org/
-                _format (str): Indiates piture format, default is JPEG
-
-            """
-
-            if _delay is not None:
-                self.delay = _delay
-            if _directory is not None:
-                self.directory = _directory
-            if _file is not None:
-                self.file = _file
-            if _format is not None:
-                self.format = _format
-            if _keep is not None:
-                self.keep = _keep
-            if _save is not None:
-                self.save = _save
-
-        def record(self):
-
-            """Recorder background thread
-
-            Do not call this method directly. Use start() instead.
-
-            """
-
-            while self.recording:
-
-                if self.save:
-                    _frame = self.owner.capture(_directory=self.directory, _file=self.file, _format=self.format)
-                else:
-                    _frame = self.owner.capture()
-
-                if self.keep:
-                    self.buffer.put((_frame, time.time()))
-
-                time.sleep(self.delay / 1000)
-
-        def start(self):
-
-            """Starts background thread for recording"""
-
-            self.recorder = Thread(target=self.record, args=())
-            self.recording = True
-            self.recorder.start()
-
-        def stop(self):
-
-            """Stops background thread for recording"""
-
-            self.recording = False
-            self.recorder.join()
-
-        def buffer_is_empty(self):
-
-            """Ckeck if buffer is empty"""
-
-            return self.buffer.empty()
-
-        def buffer_next(self):
-
-            """Returns oldest frame in the buffer
-
-            Calling this method requires _keep to be True.
-            Returned frame gets removed from the buffer.
-
-            """
-
-            return self.buffer.get_nowait()
-
-        def buffer_all(self):
-
-            """Returns all frames stored in the buffer
-
-            Calling this method requires _keep to be True.
-
-            """
-
-            return list(self.buffer.queue)
-
-        def buffer_clear(self):
-
-            """Clears the buffer"""
-
-            self.buffer.clear()
-
-        def buffer_load(self):
-
-            """Loads all frames stored in _directory
-            into the buffer.
-
-            Calling this method requires _directory to be
-            defined to an existing direcotry.
-
-            """
-
-            _files = glob(self.directory)
-            print(_files)
+if __name__ == "__main__":
+    main()
