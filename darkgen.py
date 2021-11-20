@@ -180,9 +180,9 @@ class ap_helpers:
         rv = [int(x) for x in fields]
         if rv[0] < -2:
             raise ValueError("Invalid minimum gain")
-        if rv[1] < -2:
+        if rv[1] < -2 or rv[1] < rv[0]:
             raise ValueError("Invalid maxiumum gain")
-        if rv[2] < 0:
+        if rv[2] < -2 or rv[2] == 0:
             raise ValueError("Invalid gain step")
         return rv
 
@@ -199,6 +199,13 @@ class ap_helpers:
         if rv[2] < 1e-3:
             raise ValueError("Invalid exposure step (min 1ms)")
         return rv
+
+    @staticmethod
+    def non_neg_int(s: str) -> int:
+        i = int(s)
+        if i < 0:
+            raise ValueError("Non-negative integer required")
+        return i
 
     @staticmethod
     def pos_int(s: str) -> int:
@@ -243,23 +250,24 @@ def get_args() -> argparse.Namespace:
         "--filename-format",
         metavar="STR",
         default="dark_{expms}ms_{gain:03d}g_{temp:+03d}C.png",
-        help="filename pattern for darks. The tokens {expms}, {gain}, and {temp} will be interpolated as python formats.",
+        help="filename pattern for darks. The tokens {model}, "
+        "{stack}, {expms}, {gain}, and {temp} will be interpolated as python formats.",
     )
     ap.add_argument(
         "-g",
         "--gain",
         metavar="MIN:MAX:STEP",
-        default="-1:-1:5",
+        default="-1:-1:-1",
         type=ap_helpers.gain,
-        help="gain range to scan (-1=automatic)",
+        help="gain range to scan (int; -1=automatic)",
     )
     ap.add_argument(
         "-x",
         "--exposure",
         metavar="MIN:MAX:STEP",
-        default="1:120:1",
+        default="2:20:2",
         type=ap_helpers.exposure,
-        help="exposure range to scan, in seconds.",
+        help="exposure range to scan, in seconds. (float)",
     )
 
     # "Advanced" parameters
@@ -269,9 +277,16 @@ def get_args() -> argparse.Namespace:
     )
     ap.add_argument("--binning", default=1, type=ap_helpers.pos_int, help="Pixel binning factor")
     ap.add_argument(
-        "--stack", default=1, type=ap_helpers.pos_int, help="Number of exposures to stack to build dark frame"
+        "--stack",
+        default=1,
+        metavar="INT",
+        type=ap_helpers.pos_int,
+        help="Number of exposures to stack to build dark frame",
     )
-    ap.add_argument("--quality", default=100, type=int, help="image quality")
+    ap.add_argument("--quality", default=100, type=ap_helpers.pos_int, help="image quality")
+    ap.add_argument("--offset", default=0, metavar="INT", type=ap_helpers.non_neg_int, help="brightness offset")
+    ap.add_argument("--wbr", metavar="INT", type=ap_helpers.pos_int, help="white balance:red")
+    ap.add_argument("--wbb", metavar="INT", type=ap_helpers.pos_int, help="white balance:blue")
     # ap.add_argument("--size", type=ap_helpers.img_size)
     # ap.add_argument("--no-video", default=False, action="store_true")
     return ap.parse_args()
@@ -309,10 +324,15 @@ def main():
         zwocam.show_camera_info()
         exit()
 
+    # unless otherwise specified scan from 25-75% of gain range
+    tmp = (zwocam.camera_properties["Gain"]["MinValue"] + zwocam.camera_properties["Gain"]["MaxValue"]) / 2
     if args.gain[0] == -1:
-        args.gain[0] = zwocam.camera_properties["Gain"]["MinValue"]
+        args.gain[0] = round(tmp - tmp / 2)
     if args.gain[1] == -1:
-        args.gain[1] = zwocam.camera_properties["Gain"]["MaxValue"]
+        args.gain[1] = round(tmp + tmp / 2)
+    if args.gain[2] == -1:
+        args.gain[2] = round(tmp / 10)
+
     if args.exposure[1] == -1:
         args.exposure[1] = zwocam.camera_properties["Exposure"]["MaxValue"] // 1000
     if args.binning and args.binning not in zwocam.camera_info["SupportedBins"]:
@@ -337,10 +357,21 @@ def main():
 
     print(f"This run will take approximately {total_exp_time/60:.1f}min.", end=" ")
     print(f"Estimated size {num_exps} files, {total_storage//1024**2}MB")
+    if args.verbose:
+        print(f"Scanning gain levels {gain_list}")
+        print(f"Exposure durations {[round(x/1e6,1) for x in exposure_list]}")
 
     for exposure_us in exposure_list:
         for gain in gain_list:
-            zwocam.configure(gain=gain, exposure=exposure_us, flip=args.flip)
+            zwocam.configure(
+                gain=gain,
+                exposure=exposure_us,
+                flip=args.flip,
+                wb_b=args.wbb,
+                wb_r=args.wbr,
+                offset=args.offset,
+                binning=args.binning,
+            )
             images = []
             temperatures = []
             for i in range(args.stack):
@@ -374,7 +405,7 @@ def main():
                 os.unlink(outfile)
             stack_image.save(outfile, params=img_params)
 
-    print()
+    print("Exposure sequence complete")
 
 
 if __name__ == "__main__":
