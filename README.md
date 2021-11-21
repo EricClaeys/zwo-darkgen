@@ -62,3 +62,6 @@ When constructing the output filename, the following tokens are available to be 
 * `{model}` - sanitized camera model (eg. `ZWO ASI120MM Mini` -> `zwo_asi120mm_mini`)
 * `{stack}` - stacking factor
 
+Because this tool uses PIL/Pillow for image output, file extension determines
+the file format. Any [supported format](https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html)
+can be produced, though formats with lossy image compression should not be used.

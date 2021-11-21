@@ -7,6 +7,7 @@ import logging
 import zwoasi as asi
 from numpy import uint8
 from PIL import Image
+import signal
 import argparse
 
 logger: logging.Logger = logging.getLogger()
@@ -31,12 +32,21 @@ class ZwoCamera:
     def _get_default(self, prop):
         return None if prop not in self.camera_properties else self.camera_properties[prop].get("DefaultValue", None)
 
-    def __init__(self, camera_id=None, bandwidth=80):
+    @staticmethod
+    def sigalrm_watchdog(signum, frame):
+        raise TimeoutError("Caught SIGALRM waiting for exposure to complete")
+
+    def __init__(self, camera_id=None, bandwidth=80, use_sigalrm_watchdog=False):
         "Initialize self.camera to a default good state"
         logger.debug("Creating Camera")
         self.camera = asi.Camera(camera_id)
         self.camera.stop_video_capture()
         self.camera.stop_exposure()
+
+        if use_sigalrm_watchdog:
+            signal.signal(signal.SIGALRM, ZwoCamera.sigalrm_watchdog)
+        else:
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
 
         logger.debug("Getting camera info")
         self.camera_info = self.camera.get_camera_property()
@@ -136,18 +146,22 @@ class ZwoCamera:
         # elif mode == "picture":
         #    self.camera.stop_video_capture()
 
-    def retryable_capture(self, n=3, t=0.5):
+    def retryable_capture(self, num_retries=3, retry_delay=0.5):
         exptime = self.get_exposure_time()
         last_exception = None
-        for i in range(n):
+        for i in range(num_retries):
             try:
-                return self.camera.capture_video_frame()  # initial_sleep=exptime * 0.95, poll=exptime * 0.01)
+                signal.alarm(round(exptime + 1))
+                frame = self.camera.capture_video_frame()
+                signal.alarm(0)
+                return frame
             except KeyboardInterrupt:
+                signal.alarm(0)
                 self.camera.stop_video_capture()
                 self.camera.stop_exposure()
                 raise
             except asi.ZWO_Error as e:
-                time.sleep(t)
+                time.sleep(retry_delay)
                 last_exception = str(e)
         raise asi.ZWO_IOError(last_exception)
 
@@ -319,7 +333,7 @@ def main():
             print(f"    {c[0]:2d} -> {c[1]}")
         exit()
 
-    zwocam = ZwoCamera(args.camera)
+    zwocam = ZwoCamera(args.camera, use_sigalrm_watchdog=True)
     if args.info:
         zwocam.show_camera_info()
         exit()
@@ -381,12 +395,14 @@ def main():
                     print(f"\rn:{i:2d} exp:{exposure_us/1e6:.1f}s gain:{gain:3d} temp:{sensor_temp:+5.1f}'C", end="")
                 images.append(zwocam.retryable_capture())
                 temperatures.append(sensor_temp)
+            temperatures.append(zwocam.get_temperature())
 
             # average the frames. maybe be more clever later
-            stack_image = sum(images) / args.stack
+            # TODO: be much more clever and detect when the lens cap gets disturbed...
+            stack_image = sum(images) / len(images)
             stack_image = Image.fromarray(stack_image.astype(uint8))
             # always round up: -39.99C -> -39C, 0.01C -> 1C
-            stack_temperature = round(sum(temperatures) / args.stack + 0.5)
+            stack_temperature = round(sum(temperatures) / len(temperatures) + 0.5)
 
             outfile = os.path.join(
                 args.directory,
@@ -405,7 +421,7 @@ def main():
                 os.unlink(outfile)
             stack_image.save(outfile, params=img_params)
 
-    print("Exposure sequence complete")
+    print("\nExposure sequence complete")
 
 
 if __name__ == "__main__":
