@@ -16,13 +16,15 @@ Install dependencies from the package repositories:
 Install the ZWO ASI library binding
 `sudo -H pip3 install zwoasi`
 
+<!--
 ### Cloning repository
 
 You can clone this repository by executing:
 
-`git clone https://github.com/ckuethe/zwo-darkgen`
+`git clone https://github.com/EricClaeys/zwo-darkgen`
 
 or download the [code archive](https://github.com/ckuethe/zwo-darkgen/archive/refs/heads/master.zip) from GitHub
+-->
 
 ## Usage
 
@@ -30,7 +32,7 @@ or download the [code archive](https://github.com/ckuethe/zwo-darkgen/archive/re
 darkgen.py [-h] [-I] [-v] [-c CAMERA] [-l PATH] [-d PATH] [-f STR]
            [-g MIN:MAX:STEP] [-x MIN:MAX:STEP] [--binning INT]
            [--flip {n,h,v,hv,vh,b}] [--stack INT] [--quality INT]
-           [--offset INT] [--wbr INT] [--wbb INT]
+           [--offset INT] [--wbr FLOAT] [--wbb FLOAT]
 ```
 
 ### optional arguments:
@@ -40,10 +42,10 @@ darkgen.py [-h] [-I] [-v] [-c CAMERA] [-l PATH] [-d PATH] [-f STR]
 | -I | --info | Print info about selected camera and exit (`False`) |
 | -c CAMERA | --camera CAMERA | Camera index (`None`) |
 | -l PATH | --library PATH | path to SDK library (`./libASICamera2.so`) |
-| -d PATH | --directory PATH | path to output darks (`zwo_dark`) |
-| -f STR | --filename-format STR | filename pattern for darks.  (`dark_{expms}ms_{gain:03d}g_{temp:+03d}C.png`) |
-| -g MIN:MAX:STEP | --gain MIN:MAX:STEP | gain range to scan, specified as 3 integers. The value `-1` for any of the fields signals that this field should be automatically chosen (`-1:-1:-1`) |
-| -x MIN:MAX:STEP | --exposure MIN:MAX:STEP | exposure range to scan, in seconds, specified as 3 floating point values. (`2.0:20.0:2.0`) |
+| -d PATH | --directory PATH | path to output darks (`darks`) |
+| -f STR | --filename-format STR | filename pattern for darks.  (`dark_{exps}s_{gain:03d}g_{temp:+02d}C.png`) |
+| -g MIN:MAX:STEP | --gain MIN:MAX:STEP | gain range to scan, specified as 3 floats. The value `-1.0` for any of the fields signals that this field should be automatically chosen (`-1.0:-1.0:-1.0`) |
+| -x MIN:MAX:STEP | --exposure MIN:MAX:STEP | exposure range to scan, in seconds, specified as 3 integers. (`2:20:2`) |
 | -v | --verbose | Increase debug level |
 | | --flip {n,h,v,hv,vh,b} | whether the image is to be flipped on the horizonal or vertical axes, or both (`none`) |
 | | --binning INT | Pixel binning factor (`1`) |
