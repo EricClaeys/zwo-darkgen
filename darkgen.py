@@ -1,3 +1,16 @@
+#!/usr/bin/env python3
+
+import os
+import time
+from typing import List, Optional, Tuple
+import logging
+import zwoasi as asi
+from numpy import uint8
+from PIL import Image
+import signal
+import argparse
+
+logger: logging.Logger = logging.getLogger()
 
 
 class ZwoCamera:
@@ -49,9 +62,8 @@ class ZwoCamera:
 			flip=self._get_default("Flip"),
 			wb_b=self._get_default("WB_B"),
 			wb_r=self._get_default("WB_R"),
-			color=True if self._get_default("WB_R") else False,
-			drange=8,
 			bitdepth=self._get_default("Bitdepth"),
+			color=True if self._get_default("Bitdepth") == 24 or self._get_default("WB_R") else False,
 			gamma=self._get_default("Gamma"),
 			binning=self.camera_info["SupportedBins"][0],
 		)
@@ -60,6 +72,7 @@ class ZwoCamera:
 	def configure(
 		self,
 		*,
+		directory=None,
 		gain=None,
 		exposure=None,
 		wb_b=None,
@@ -69,7 +82,6 @@ class ZwoCamera:
 		flip=None,
 		binning=None,
 		roi=None,
-		drange=None,
 		bitdepth=None,
 		color=None,
 		mode=None,
@@ -83,12 +95,10 @@ class ZwoCamera:
 			wb_r (int): Camera whitebalance
 			gamma (int): Camera gamma
 			offset (int): Camera brightness
-			flip (int): Picture flip, valuse can be 0 or 1
+			flip (str): Picture flip
 			binning (int): Picture binning, values can be 1 or 2
 			roi (tuple): Region of interest, formatted as a tuple (x, y, width, height)
-			drange (int): Dynamic range, value can be 8 or 16 bits
 			bitdepth (int): 8, 16, or 24 bits
-			color (bool): Camera color mode
 			mode (str): Capturing mode, value can be 'video' or 'picture'
 		"""
 
@@ -126,13 +136,12 @@ class ZwoCamera:
 
 		self.camera.set_roi(start_x=roi[0], start_y=roi[1], width=roi[2], height=roi[3], bins=binning)
 
-		if color is True:
+		if bitdepth == 8:
+			self.camera.set_image_type(asi.ASI_IMG_RAW8)
+		elif bitdepth == 16:
+			self.camera.set_image_type(asi.ASI_IMG_RAW16)
+		elif color is True:
 			self.camera.set_image_type(asi.ASI_IMG_RGB24)
-		else:
-			if drange == 8:
-				self.camera.set_image_type(asi.ASI_IMG_RAW8)
-			elif drange == 16:
-				self.camera.set_image_type(asi.ASI_IMG_RAW16)
 
 		if mode is not None:
 			# self.mode = mode
@@ -186,15 +195,15 @@ class ap_helpers:
 	def bitdepth(s: str) -> int:
 		i = int(s)
 		if i != 8 and i != 16 and i != 24:
-			raise ValueError("Bitdepth must be mono: 8 or 16.   color: 24")
+			raise ValueError("Bitdepth type must be  8 or 16 for mono or 24 for color")
 		return i
 
 	@staticmethod
-	def gain(s: str) -> List[int]:
+	def gain(s: str) -> List[float]:
 		fields = s.split(":")
 		if len(fields) != 3:
 			raise ValueError("Incorrect gain specification")
-		rv = [int(x) for x in fields]
+		rv = [float(x) for x in fields]
 		if rv[0] < -2:
 			raise ValueError("Invalid minimum gain")
 		if rv[1] < -2 or rv[1] < rv[0]:
@@ -204,17 +213,17 @@ class ap_helpers:
 		return rv
 
 	@staticmethod
-	def exposure(s: str) -> List[float]:
+	def exposure(s: str) -> List[int]:
 		fields = s.split(":")
 		if len(fields) != 3:
 			raise ValueError("Incorrect exposure specification")
-		rv = [float(x) for x in fields]
-		if rv[0] < 1e-3:
-			raise ValueError("Invalid minimum exposure (min 1ms)")
+		rv = [int(x) for x in fields]
+		if rv[0] < 1:
+			raise ValueError("Invalid minimum exposure (min 1s)")
 		if rv[1] > 900:
 			raise ValueError("Invalid maximum exposure (max 900s)")
-		if rv[2] < 1e-3:
-			raise ValueError("Invalid exposure step (min 1ms)")
+		if rv[2] < 1:
+			raise ValueError("Invalid exposure step (min 1s)")
 		return rv
 
 	@staticmethod
@@ -252,10 +261,8 @@ def get_args() -> argparse.Namespace:
 	When constructing the output filename, the following tokens are available:
 	{temp} - sensor temperature in C, rounded up: 26.1 -> 27;
 	{gain} - gain in arbitrary units;
-	{expms} - exposure time in milliseconds;
 	{exps} - exposure time in integer seconds;
 	{model} - sanitized camera model: 'ZWO ASI120MM Mini' -> 'zwo_asi120mm_mini';
-	{stack} - stacking factor
 	"""
 
 	ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, epilog=ep)
@@ -265,7 +272,7 @@ def get_args() -> argparse.Namespace:
 	ap.add_argument("-d", "--directory", metavar="PATH", help="path to output darks")
 	ap.add_argument("-f", "--filename-format", metavar="STR", default="dark_{exps}s_{gain:03d}g_{temp:02d}C.png",
 		help="filename pattern for darks. The tokens {model}, "
-		"{stack}, {expms}, {exps}, {gain}, and {temp} will be interpolated as python formats.",
+		"{exps}, {gain}, and {temp} will be interpolated as python formats.",
 	)
 	ap.add_argument("-b", "--bitdepth", metavar="INT", type=ap_helpers.bitdepth,
 		help="bit depth: 8, 16, or 24 (color)",
@@ -273,11 +280,11 @@ def get_args() -> argparse.Namespace:
 	ap.add_argument("-g", "--gain", metavar="MIN:MAX:STEP", default="-1:-1:-1", type=ap_helpers.gain,
 		help="gain range to scan (int; -1=automatic)",
 	)
-	ap.add_argument("-x", "--exposure", metavar="MIN:MAX:STEP", default="2:20:2", type=ap_helpers.exposure,
-		help="exposure range to scan, in seconds. (float)",
+	ap.add_argument("-x", "--exposure", metavar="MIN:MAX:STEP", default="2:60:2", type=ap_helpers.exposure,
+		help="exposure range to scan, in seconds. (int)",
 	)
 	ap.add_argument("--binning", default=1, type=ap_helpers.pos_int, help="Pixel binning factor")
-	ap.add_argument("--stack", default=1, metavar="INT", type=ap_helpers.pos_int,
+	ap.add_argument("--stack", default=2, metavar="INT", type=ap_helpers.pos_int,
 		help="Number of exposures to stack to build dark frame",
 	)
 	ap.add_argument("--flip", type=ap_helpers.flip, choices=ap_helpers.flip(),
@@ -326,8 +333,10 @@ def main():
 		exit()
 
 	if args.bitdepth is None:
-		print("\nERROR: Must specify a bit depth of 8, 16, or 24.\n")
-		exit()
+		if zwocam.camera_info["IsColorCam"]:
+			args.bitdepth = 24
+		else:
+			args.bitdepth = 8
 
 	# unless otherwise specified scan from 25-75% of gain range
 	tmp = (zwocam.camera_properties["Gain"]["MinValue"] + zwocam.camera_properties["Gain"]["MaxValue"]) / 2
@@ -344,7 +353,7 @@ def main():
 		raise ValueError(f"Binning value must be one of {zwocam.camera_info['SupportedBins']}")
 
 	if args.directory is None:
-		args.directory = ""
+		args.directory = "darks/" + zwocam.name 
 	else:
 		os.makedirs(args.directory, exist_ok=True)
 	img_params = {"quality": args.quality, "subsampling": 0 if args.quality >= 100 else 1}
@@ -363,8 +372,8 @@ def main():
 	total_storage = num_exps * zwocam.camera_info["MaxHeight"] * zwocam.camera_info["MaxWidth"]
 	total_storage *= args.bitdepth/8
 
-	print(f"This run will take approximately {total_exp_time/60:.1f}min.", end=" ")
-	print(f"Estimated size {num_exps} files, {total_storage//1024**2}MB")
+	print(f"This run will take approximately {total_exp_time/60:.1f} min.", end=" ")
+	print(f"Estimated size {num_exps} files, {total_storage//1024**2} MB")
 	if args.verbose:
 		print(f"Scanning gain levels {gain_list}")
 		print(f"Exposure durations {[round(x/1e6,1) for x in exposure_list]}")
@@ -404,9 +413,7 @@ def main():
 				args.filename_format.format_map(
 					{
 						"model": zwocam.name,
-						"stack": args.stack,
 						"gain": gain,
-						"expms": exposure_us // 1000,
 						"exps": int(exposure_us // 1000000),
 						"temp": int(stack_temperature),
 					}
